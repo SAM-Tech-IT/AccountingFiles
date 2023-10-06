@@ -1,7 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Text;
-using Oracle.DataAccess.Client;
 using System.Configuration;
 using System.Data;
 using System.IO;
@@ -22,12 +21,14 @@ namespace AccountingFiles
     {
         [Option('e', "env", Required = true, HelpText = "nonPROD or PROD")]
         public string Env { get; set; }
+
+        [Option('d', "debug", Required = false, HelpText = "Show detailed information")]
+        public bool Debug { get; set; }
     }
 
     class Program
     {
         private static readonly ILog log = LogManager.GetLogger(typeof(Program));
-        private static string m_exePath = string.Empty;
         private const string AesIV256 = @"!QAZ2WSX#EDC4RFV";
         private const string AesKey256 = @"5TGB&YHN7UJM(IK<5TGB&YHN7UJM(IK<";
 
@@ -66,6 +67,7 @@ namespace AccountingFiles
             {
                 Program ot = new Program();
                 string path = ot.GetPath();
+                log.Info("Running in environment: " + options.Env);
                 log.Info("Working directory: " + path);
 
                 // Read porgrpik from app.config
@@ -78,45 +80,45 @@ namespace AccountingFiles
                     list_porgrpik.Add(iks);
                 }
 
-                string environment = options.Env;
-                if (options.Env.Contains("non"))
-                {
-                    environment = "TEST";
-                }
-
                 //Open MSSQL DB
-                log.Info("Open database...");
-                SqlConnection DBReturn = ot.MSSQLopenDB(environment);
+                SqlConnection DBReturn = ot.MSSQLopenDB(options);
 
                 //Get password from Enigma
-                DataTable ret = ot.GetPassword(ConfigurationManager.AppSettings[environment + "_ActuateId"], DBReturn);
+                log.Info("Get password...");
+                DataTable ret = ot.GetPassword(ConfigurationManager.AppSettings[options.Env + "_iHubId"], DBReturn);
+                if (options.Debug)
+                {
+                    log.Info("iHub User::: " + ret.Rows[0][0].ToString());
+                }
 
                 //Close MSSQL DB
+                log.Info("Close database '" + options.Env + "_Enigma'...");
                 ot.MSSQLcloseDB(DBReturn);
 
-                //Open DB
-                OracleConnection con = ot.OraConnect(environment);
+                //open db
+                Oracle.DataAccess.Client.OracleConnection con = ot.OraConnect(options);
 
-                // Logg på Actuate server via Web Service
-                string ActuateURL = ConfigurationManager.AppSettings[environment + "_ActuateURL"];
-                log.Info("Connect to Actuate webservice: " + ActuateURL);
-                string ActuateBrukernavn = ConfigurationManager.AppSettings["ActuateBrukernavn"];
-                string ActuateVolum = ConfigurationManager.AppSettings["ActuateVolum"];
+                // Logg på iHub server via Web Service
+                string iHubURL = ConfigurationManager.AppSettings[options.Env + "_iHubURL"];
+                log.Info("Connect to iHub webservice: " + iHubURL);
+                string iHubBrukernavn = ConfigurationManager.AppSettings["iHubBrukernavn"];
+                string iHubVolum = ConfigurationManager.AppSettings["iHubVolum"];
                 const SslProtocols _Tls12 = (SslProtocols)0x00000C00;
                 const SecurityProtocolType Tls12 = (SecurityProtocolType)_Tls12;
                 ServicePointManager.SecurityProtocol = Tls12;
-                Login(out ActuateAPI l_proxy, ActuateURL, ActuateBrukernavn, ret.Rows[0][1].ToString(), ActuateVolum);
+                Login(out ActuateAPI l_proxy, iHubURL, iHubBrukernavn, ret.Rows[0][1].ToString(), iHubVolum, options);
 
 
-                //create Actuate folder
-                string ActuateFolderkunde = ConfigurationManager.AppSettings["ActuateFolderkunde"];
+                //Navigate to iHub folder
+                string iHubFolder = ConfigurationManager.AppSettings["iHubFolder"];
+                string iHubkunde = ConfigurationManager.AppSettings["iHubkunde"];
                 DateTime t = DateTime.Now.AddMonths(-1);
                 string format_year = "yyyy";
                 string format_month = "MM";
-                string ActuateAar = t.ToString(format_year);
-                string ActuateMaaned = t.ToString(format_month);
-                ActuateFolderkunde = ActuateFolderkunde + ActuateAar + "/" + ActuateMaaned + "/";
-                log.Info("Actuate folder: " + ActuateFolderkunde);
+                string iHubAar = t.ToString(format_year);
+                string iHubMaaned = t.ToString(format_month);
+                string iHubFolderkunde = iHubFolder + iHubkunde + iHubAar + "/" + iHubMaaned + "/";
+                log.Info("NHO iHub folder: " + iHubFolderkunde);
 
                 for (int i = 0; i < list_porgrpik.Count; i++)
                 {
@@ -125,51 +127,55 @@ namespace AccountingFiles
 
                     // Get data from Database, put into DataTable
                     DataTable dt = ot.GetDataFromOraDB(sql, con);
-                    log.Info("Get data for porgrpik: " + porgrpik);
+                    log.Info("Get data for porgrpik from DB: " + porgrpik);
 
                     // Write file
                     ot.WriteFile(ot.GetFileName(porgrpik), dt);
                     log.Info("Write file: " + path + @"\" + ot.GetFileName(porgrpik));
 
-                    // Send file to Actuate Webservice
-                    ot.KallActuateAPI(ActuateFolderkunde, ActuateVolum, l_proxy, ot.GetFileName(porgrpik));
+                    // Send file to iHub Webservice
+                    ot.KalliHubAPI(iHubFolderkunde, iHubVolum, l_proxy, ot.GetFileName(porgrpik), path);
+
+                    //Delete file 
+                    log.Info("Delete file: " + path + @"\" + ot.GetFileName(porgrpik));
+                    System.IO.File.Delete(path + "\\" + ot.GetFileName(porgrpik));
                 }
 
                 // Close DB
                 ot.OraClose(con);
-                log.Info("Close database...");
-                //log.Info("----------------------------------------------", 1);
+                log.Info("Close database '" + options.Env + "_SCD'...");
+
+                // Les nye kunder Ferd, Viken Pensjonskasse, Fellesordningen for AFP SLV
+                string iHubNyekunder = ConfigurationManager.AppSettings["iHubNyekunder"];
+                string[] ank = iHubNyekunder.Split(',');
+
+                foreach (string ank_num in ank)
+                {
+                    log.Info("Kunde: " + ank_num);
+                    iHubFolderkunde = iHubFolder + ank_num + "/" + iHubAar + "/" + iHubMaaned + "/";
+                    log.Info("iHubFolderkunde: " + iHubFolderkunde);
+                    string[] fileEntries = Directory.GetFiles(ConfigurationManager.AppSettings[options.Env + "_FileFolder"], "*" + ConfigurationManager.AppSettings["FileNames" + ank_num] + "*.*");
+                    if (fileEntries.Length != 0)
+                    {
+                        foreach (string fileName in fileEntries)
+                        {
+                            log.Info("Filename: " + fileName);
+                            ot.KalliHubAPI(iHubFolderkunde, iHubVolum, l_proxy, Path.GetFileName(fileName), ConfigurationManager.AppSettings[options.Env + "_FileFolder"]);
+
+                            //moving file to archive
+                            log.Info("move " + fileName + " to " + ConfigurationManager.AppSettings[options.Env + "_FileFolder"] + "\\archive\\" + Path.GetFileName(fileName));
+                            System.IO.File.Move(fileName, ConfigurationManager.AppSettings[options.Env + "_FileFolder"] + "\\archive\\" + Path.GetFileName(fileName));
+                        }
+                    } else
+                    {
+                        log.Info("No files for upload...");
+                    }
+                }
+
             }
             catch (Exception ex)
             {
                 Console.WriteLine(ex.ToString());
-            }
-        }
-
-        private static void AppendLog(string logMessage, TextWriter txtWriter)
-        {
-            try
-            {
-                txtWriter.WriteLine("  :{0}", logMessage);
-            }
-            catch (Exception ex)
-            {
-                log.Error(ex.ToString());
-                Console.WriteLine(ex.Message.ToString());
-            }
-        }
-
-        private static void StartLog(string logMessage, TextWriter txtWriter)
-        {
-            try
-            {
-                txtWriter.Write("\r\nLog Entry : ");
-                txtWriter.WriteLine("{0} {1}", DateTime.Now.ToLongTimeString(), DateTime.Now.ToLongDateString());
-            }
-            catch (Exception ex)
-            {
-                log.Error(ex.Message.ToString());
-                Console.WriteLine(ex.Message.ToString());
             }
         }
 
@@ -220,10 +226,15 @@ namespace AccountingFiles
 
 
         /// <summary>
-        /// Logger på Actuate server
+        /// Logger på iHub server
         /// </summary>	
-        static void Login(out ActuateAPI proxy, string url, string userName, string password, string volume)
+        static void Login(out ActuateAPI proxy, string url, string userName, string password, string volume, Options options)
         {
+            // Password is stored in Enigma as ' ' It is not possible to store an empty password. The password to iHub in nonPROD is an empty password. Need to set that.
+            if (options.Env.Equals("nonPROD", StringComparison.InvariantCultureIgnoreCase)) {
+                password = "";
+            }
+
             //	Create an instance of server proxy. Construct an empty header.
             proxy = new ActuateAPI
             {
@@ -239,7 +250,7 @@ namespace AccountingFiles
                 Password = password
             };
 
-            log.Info("Login with user: " + userName);
+            log.Info("Login to iHub with user: " + userName);
 
             //	Send Login reqest, handle SOAP exception if any
             LoginResponse l_loginRes;
@@ -258,11 +269,10 @@ namespace AccountingFiles
         }
 
 
-        private void KallActuateAPI(string ActuateFolderkunde, string ActuateVolum, ActuateAPI l_proxy, string filename)
+        private void KalliHubAPI(string iHubFolderkunde, string iHubVolum, ActuateAPI l_proxy, string filename, string path)
         {
             try
             {
-                string path = GetPath();
 
                 // Create extended proxy inctance
                 ActuateAPIEx l_proxyEx = new ActuateAPIEx
@@ -271,7 +281,7 @@ namespace AccountingFiles
                     HeaderValue = new Header
                     {
                         AuthId = l_proxy.HeaderValue.AuthId,
-                        TargetVolume = ActuateVolum
+                        TargetVolume = iHubVolum
                     }
                 };
 
@@ -329,7 +339,7 @@ namespace AccountingFiles
                 UpdateFile l_UpdateFile1 = new UpdateFile
                 {
                     Item1ElementName = Item1ChoiceType14.Name,
-                    Item1 = ActuateFolderkunde,
+                    Item1 = iHubFolderkunde,
                     UpdateFileOperationGroup = ufoaUpdateFileOperation
                 };
 
@@ -346,7 +356,7 @@ namespace AccountingFiles
                     // Set NewFile object
                     NewFile = new NewFile()
                 };
-                l_UploadFile.NewFile.Name = ActuateFolderkunde + filename;
+                l_UploadFile.NewFile.Name = iHubFolderkunde + filename;
                 l_UploadFile.NewFile.ReplaceExisting = true;
                 l_UploadFile.NewFile.ReplaceExistingSpecified = true;
                 l_UploadFile.NewFile.MaxVersions = 1;
@@ -360,7 +370,7 @@ namespace AccountingFiles
 
                 //Open the file to be uploaded
                 ActuateAPIEx.UploadStream = new FileStream(path + "\\" + filename, FileMode.Open);
-                log.Info("Upload file to Actuate: " + ActuateFolderkunde + filename);
+                log.Info("Upload file to iHub: " + iHubFolderkunde + filename);
 
                 // Send request
                 UploadFileResponse l_res;
@@ -380,9 +390,6 @@ namespace AccountingFiles
                 //PrintExceptionDetails(e);
             }
         }
-
-
-
 
         /// <summary>
         /// Dekrypterer en streng
@@ -422,14 +429,22 @@ namespace AccountingFiles
 
 
         //Ora connect
-        public OracleConnection OraConnect(string env)
+        public Oracle.DataAccess.Client.OracleConnection OraConnect(Options options)
         {
+
+            log.Info("Open database '" + options.Env + "_SCD'...");
+            Oracle.DataAccess.Client.OracleConnection con = new Oracle.DataAccess.Client.OracleConnection
+            {
+                ConnectionString = String_Decrypt(ConfigurationManager.ConnectionStrings[options.Env + "_SCD"].ConnectionString)
+            };
+            if (options.Debug)
+            {
+                string[] debug_info_split = con.ConnectionString.Split(new string[] { "Password=" }, StringSplitOptions.None);
+                log.Info("Connection string::: " + debug_info_split[0].ToString());
+            }
             try
             {
-                OracleConnection con = new OracleConnection();
-
-                con.ConnectionString = String_Decrypt(ConfigurationManager.ConnectionStrings[env + "_SCD"].ConnectionString);
-                OracleCommand command = con.CreateCommand();
+                Oracle.DataAccess.Client.OracleCommand command = con.CreateCommand();
                 con.Open();
                 return con;
             }
@@ -481,7 +496,7 @@ namespace AccountingFiles
 
 
         //Ora close
-        public void OraClose(OracleConnection con)
+        public void OraClose(Oracle.DataAccess.Client.OracleConnection con)
         {
             try
             {
@@ -497,9 +512,9 @@ namespace AccountingFiles
         }
 
         // Les fra Database og returner en DataTable med innholdet
-        public DataTable GetDataFromOraDB(string query, OracleConnection con)
+        public DataTable GetDataFromOraDB(string query, Oracle.DataAccess.Client.OracleConnection con)
         {
-            OracleCommand command = con.CreateCommand();
+            Oracle.DataAccess.Client.OracleCommand command = con.CreateCommand();
             command.CommandText = query;
             var dt = new DataTable();
             try
@@ -597,12 +612,19 @@ namespace AccountingFiles
         }
 
         // MSSQL Open
-        public SqlConnection MSSQLopenDB(string env)
+        public SqlConnection MSSQLopenDB(Options options)
         {
             try
             {
+                log.Info("Open database '" + options.Env + "_Enigma'...");
                 SqlConnection conn = null;
-                conn = new SqlConnection(String_Decrypt(ConfigurationManager.ConnectionStrings[env + "_Enigma"].ConnectionString));
+                if (options.Debug)
+                {
+                    string debug_info = String_Decrypt(ConfigurationManager.ConnectionStrings[options.Env + "_Enigma"].ConnectionString);
+                    string[] debug_info_split = debug_info.Split(new string[] { "password=" }, StringSplitOptions.None);
+                    log.Info("Connection string::: " + debug_info_split[0].ToString());
+                } 
+                conn = new SqlConnection(String_Decrypt(ConfigurationManager.ConnectionStrings[options.Env + "_Enigma"].ConnectionString));
                 conn.Open();
 
                 return conn;
